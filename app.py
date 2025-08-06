@@ -23,16 +23,16 @@ CSV_FILENAME = "Annotated_output.csv"
 
 # Image quality assessment options
 QUALITY_ISSUES = [
-    "The entire image appears blurry making it difficult to identify any lesions.",
-    "Some parts of the image are in focus, but the oral cavity or the lesion of interest is out of focus.",
-    "The image is cropped too tightly making it difficult to locate the oral cavity region.",
-    "The image is not cropped enough. Facial features are visible, and the oral cavity is not clearly shown.",
-    "The image was taken at an incorrect angle, not following the standardized guidelines of oral cavity images.",
-    "The oral cavity is not properly retracted causing the lesion of interest to be hidden.",
-    "Shadow covering oral cavity - shadow is covering the oral cavity covering the lesion.",
-    "A retractor (e.g., ice-cream stick, fingers, or mirror) is obstructing the view of the lesion in the oral cavity.",
-    "Debris or saliva is present in the oral cavity, making it difficult to identify the lesion.",
-    "Other reasons that result in poor image quality"
+    "Image is blurry, lesions are hard to see.",
+    "Oral cavity or lesion is out of focus.",
+    "Image is cropped too tightly, oral cavity unclear.",
+    " Too much face visible; oral cavity not well shown.",
+    "Image taken from a wrong angle.",
+    "Lesion is hidden due to poor retraction.",
+    "Shadow obscures the lesion or oral cavity.",
+    "Retractor blocks view of the lesion.",
+    "Debris or saliva obscures the lesion.",
+    "Other factors degrade image quality."
 ]
 
 def get_google_drive_service():
