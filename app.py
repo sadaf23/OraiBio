@@ -195,41 +195,13 @@ def get_existing_csv_data(service, folder_id):
         st.warning(f"Could not read existing CSV: {str(e)}")
         return []
 
-def fetch_images_from_drive(service, folder_id):
-    """Fetch all images from Google Drive folder, excluding already assessed ones"""
+def fetch_images_from_drive(service, folder_id, page_token=None):
+    """Fetch images from Google Drive folder with pagination support"""
     if not service or not folder_id:
         st.error("Missing service or folder ID")
-        return []
+        return [], None  # Return both files and next_page_token
     
     try:
-        # First, verify folder exists and is accessible
-        try:
-            folder = service.files().get(
-                fileId=folder_id,
-                fields="id,name,mimeType,permissions"
-            ).execute()
-        except Exception as e:
-            if "404" in str(e):
-                st.error("Folder not found. Please check the folder ID and make sure it exists.")
-            elif "403" in str(e):
-                st.error("Access denied. Please make sure:")
-                st.info("• The folder is shared with your Google account, OR")
-                st.info("• The folder is set to 'Anyone with the link can view'")
-            else:
-                st.error(f"Error accessing folder: {str(e)}")
-            return []
-        
-        if folder.get('mimeType') != 'application/vnd.google-apps.folder':
-            st.error("The provided ID is not a Google Drive folder")
-            return []
-            
-        st.success(f"Successfully accessed folder: **{folder.get('name', 'Unknown')}**")
-        
-        # Get existing CSV data to filter out already assessed images
-        existing_filenames = get_existing_csv_data(service, folder_id)
-        if existing_filenames:
-            st.info(f"Found {len(existing_filenames)} already assessed images that will be skipped")
-        
         # Query for image files in the folder
         image_mimetypes = [
             'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 
@@ -241,33 +213,38 @@ def fetch_images_from_drive(service, folder_id):
         
         results = service.files().list(
             q=query,
-            fields="files(id, name, mimeType, size)",
-            pageSize=1000,  # Get all images
-            orderBy="name"
+            fields="files(id, name, mimeType, size), nextPageToken",
+            pageSize=1000,  # Get up to 1000 images per batch
+            orderBy="name",
+            pageToken=page_token
         ).execute()
         
         files = results.get('files', [])
+        next_page_token = results.get('nextPageToken')
+        
+        # Get existing CSV data to filter out already assessed images
+        existing_filenames = get_existing_csv_data(service, folder_id)
+        if existing_filenames:
+            st.info(f"Found {len(existing_filenames)} already assessed images that will be skipped")
         
         # Filter out already assessed images
         unassessed_files = [f for f in files if f['name'] not in existing_filenames]
         
         if not files:
             st.warning("No images found in this folder")
-            st.info("Make sure the folder contains image files (JPG, PNG, GIF, WebP, etc.)")
-            return []
-        
-        if not unassessed_files:
-            st.warning("All images in this folder have already been assessed!")
-            st.info(f"Found {len(files)} total images, but all are already in the CSV file")
-            return []
+            return [], None
             
-        st.info(f"Found {len(unassessed_files)} unassessed image(s) out of {len(files)} total images")
-        return unassessed_files
+        if not unassessed_files:
+            st.warning("All images in this batch have been assessed!")
+            return [], next_page_token
+            
+        st.info(f"Found {len(unassessed_files)} unassessed image(s) in this batch")
+        return unassessed_files, next_page_token
         
     except Exception as e:
         st.error(f"Drive API error: {str(e)}")
-        return []
-
+        return [], None
+        
 def download_image(service, file_info):
     """Download a single image from Google Drive"""
     try:
@@ -409,6 +386,12 @@ def initialize_session_state():
         st.session_state.image_assessments = {}
     if 'csv_data' not in st.session_state:
         st.session_state.csv_data = []
+    if 'next_page_token' not in st.session_state:
+        st.session_state.next_page_token = None
+    if 'total_batches' not in st.session_state:
+        st.session_state.total_batches = 1
+    if 'current_batch' not in st.session_state:
+        st.session_state.current_batch = 1
 
 def render_quality_checkboxes(current_file, current_assessment):
     """Render quality issues as checkboxes with improved styling"""
@@ -575,7 +558,10 @@ def main():
             st.success("Authenticated")
             if st.button("Reset Authentication"):
                 # Clear all authentication data
-                keys_to_remove = ['drive_creds', 'drive_service', 'image_files', 'current_image', 'current_image_index', 'image_assessments', 'csv_data']
+                keys_to_remove = ['drive_creds', 'drive_service', 'image_files', 
+                                'current_image', 'current_image_index', 
+                                'image_assessments', 'csv_data', 'next_page_token',
+                                'total_batches', 'current_batch', 'current_folder_id']
                 for key in keys_to_remove:
                     if key in st.session_state:
                         del st.session_state[key]
@@ -596,7 +582,9 @@ def main():
             rejected_count = sum(1 for assessment in st.session_state.image_assessments.values() 
                                if assessment.get('status') == 'Rejected')
             
-            st.metric("Images Assessed", f"{assessed_images}/{total_images}")
+            # Batch information
+            st.metric("Current Batch", f"{st.session_state.current_batch}/{st.session_state.total_batches}")
+            st.metric("Images in Batch", f"{assessed_images}/{total_images}")
             st.metric("Accepted", accepted_count)
             st.metric("Rejected", rejected_count)
             
@@ -643,15 +631,34 @@ def main():
                 # Verify write access before proceeding
                 if verify_folder_write_access(service, folder_id):
                     with st.spinner("Loading images from Google Drive..."):
-                        image_files = fetch_images_from_drive(service, folder_id)
+                        # Initialize batch tracking
+                        st.session_state.next_page_token = None
+                        st.session_state.current_batch = 1
+                        st.session_state.total_batches = 1
+                        st.session_state.current_folder_id = folder_id
+                        
+                        # Fetch first batch
+                        image_files, next_page_token = fetch_images_from_drive(
+                            service, 
+                            folder_id,
+                            st.session_state.next_page_token
+                        )
+                        
                         if image_files:
                             st.session_state.image_files = image_files
                             st.session_state.current_image_index = 0
                             st.session_state.current_image = None
                             st.session_state.image_assessments = {}
                             st.session_state.csv_data = []
-                            st.session_state.current_folder_id = folder_id
+                            st.session_state.next_page_token = next_page_token
+                            
+                            # Update total batches estimate if there are more
+                            if next_page_token:
+                                st.session_state.total_batches += 1
+                            
                             st.rerun()
+                        else:
+                            st.warning("No unassessed images found in this folder")
     
     # Display image navigation and assessment
     if st.session_state.image_files:
@@ -662,7 +669,7 @@ def main():
         current_file = st.session_state.image_files[current_idx]
         
         # Header with image info
-        st.subheader(f"Image {current_idx + 1} of {total_images}")
+        st.subheader(f"Image {current_idx + 1} of {total_images} (Batch {st.session_state.current_batch})")
         st.write(f"**{current_file['name']}**")
         
         # Load current image if not already loaded
@@ -675,9 +682,8 @@ def main():
                     st.session_state.current_image = image
                     st.session_state.loaded_image_index = current_idx
         
-        # Display current image and quality assessment side by side
+        # Display current image and quality assessment
         if st.session_state.current_image:
-            # Create two columns: image on left, quality issues on right
             col1, col2 = st.columns([1, 1])
             
             with col1:
@@ -685,46 +691,34 @@ def main():
             
             with col2:
                 st.markdown("### Image Quality Assessment")
-                
-                # Get current assessment for this image
                 current_assessment = st.session_state.image_assessments.get(current_file['id'], {})
-                
-                # Render quality issues as checkboxes
                 selected_issues = render_quality_checkboxes(current_file, current_assessment)
             
-            # Buttons section below the columns
+            # Action buttons
             st.markdown("---")
             col1, col2, col3 = st.columns([1, 1, 1])
             
             with col1:
                 if st.button("Accept", type="primary", key=f"accept_{current_file['id']}", use_container_width=True):
-                    # Save assessment data with Accept status
                     assessment_data = {
                         'status': 'Accepted',
-                        'quality_issues': [],  # No quality issues for accepted images
+                        'quality_issues': [],
                         'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
                     st.session_state.image_assessments[current_file['id']] = assessment_data
                     
-                    # Process the assessment
                     if process_assessment(service, current_file, 'Accepted', []):
-                        # Auto-advance to next image if not the last one
                         if current_idx < total_images - 1:
                             st.session_state.current_image_index = current_idx + 1
                             st.session_state.current_image = None
                             st.rerun()
+                        else:
+                            handle_batch_completion(service)
             
             with col3:
-                # Reject button - only enabled when quality issues are selected
                 reject_disabled = len(selected_issues) == 0
-                reject_help = "Select at least one quality issue to reject this image" if reject_disabled else "Reject this image with the selected quality issues"
-                
-                if st.button("Reject", 
-                            disabled=reject_disabled, 
-                            key=f"reject_{current_file['id']}", 
-                            help=reject_help,
-                            use_container_width=True):
-                    # Save assessment data with Reject status
+                if st.button("Reject", disabled=reject_disabled, key=f"reject_{current_file['id']}", 
+                           help="Select at least one quality issue to reject", use_container_width=True):
                     assessment_data = {
                         'status': 'Rejected',
                         'quality_issues': selected_issues,
@@ -732,26 +726,26 @@ def main():
                     }
                     st.session_state.image_assessments[current_file['id']] = assessment_data
                     
-                    # Process the assessment
                     if process_assessment(service, current_file, 'Rejected', selected_issues):
-                        # Auto-advance to next image if not the last one
                         if current_idx < total_images - 1:
                             st.session_state.current_image_index = current_idx + 1
                             st.session_state.current_image = None
                             st.rerun()
+                        else:
+                            handle_batch_completion(service)
             
             # Navigation buttons
             st.markdown("---")
             col1, col2 = st.columns([1, 1])
             
             with col1:
-                if st.button("Previous", disabled=(current_idx == 0)):
+                if st.button("Previous", disabled=(current_idx == 0), use_container_width=True):
                     st.session_state.current_image_index = max(0, current_idx - 1)
                     st.session_state.current_image = None
                     st.rerun()
             
             with col2:
-                if st.button("Next", disabled=(current_idx == total_images - 1)):
+                if st.button("Next", disabled=(current_idx == total_images - 1), use_container_width=True):
                     st.session_state.current_image_index = min(total_images - 1, current_idx + 1)
                     st.session_state.current_image = None
                     st.rerun()
@@ -762,6 +756,53 @@ def main():
             
         else:
             st.error("Failed to load current image")
+    
+    # Batch navigation controls
+    if (st.session_state.image_files and 'next_page_token' in st.session_state and 
+        st.session_state.current_image_index == len(st.session_state.image_files) - 1):
+        
+        st.markdown("---")
+        if st.session_state.next_page_token:
+            if st.button("Load Next Batch (1000 images)", type="primary"):
+                load_next_batch(service)
+        else:
+            st.success("All batches completed! All images have been assessed.")
+
+def handle_batch_completion(service):
+    """Handle actions when a batch is completed"""
+    if 'next_page_token' in st.session_state and st.session_state.next_page_token:
+        st.info("You've completed this batch. Click 'Load Next Batch' to continue.")
+    else:
+        st.success("All images in all batches have been assessed!")
+    st.rerun()
+
+def load_next_batch(service):
+    """Load the next batch of images"""
+    with st.spinner("Loading next batch of images..."):
+        image_files, next_page_token = fetch_images_from_drive(
+            service,
+            st.session_state.current_folder_id,
+            st.session_state.next_page_token
+        )
+        
+        if image_files:
+            st.session_state.image_files = image_files
+            st.session_state.current_image_index = 0
+            st.session_state.current_image = None
+            st.session_state.image_assessments = {}
+            st.session_state.next_page_token = next_page_token
+            st.session_state.current_batch += 1
+            
+            # Update total batches if we found more pages
+            if next_page_token and st.session_state.current_batch >= st.session_state.total_batches:
+                st.session_state.total_batches += 1
+            
+            st.rerun()
+        else:
+            st.warning("No unassessed images found in next batch")
+            if next_page_token:
+                st.session_state.next_page_token = next_page_token
+                st.rerun()
 
 if __name__ == "__main__":
     main()
