@@ -444,16 +444,16 @@ def update_csv_assessment(file_info, status, quality_issues):
     """Update CSV data with assessment"""
     # Map quality issues to column names
     issue_columns = {
-        "The entire image appears blurry making it difficult to identify any lesions.": "Blur",
-        "Some parts of the image are in focus, but the oral cavity or the lesion of interest is out of focus.": "Out of focus",
-        "The image is cropped too tightly making it difficult to locate the oral cavity region.": "Overcropped",
-        "The image is not cropped enough. Facial features are visible, and the oral cavity is not clearly shown.": "Undercropped",
-        "The image was taken at an incorrect angle, not following the standardized guidelines of oral cavity images.": "Improper Angle",
-        "The oral cavity is not properly retracted causing the lesion of interest to be hidden.": "Oral Cavity not retracted well",
-        "Shadow covering oral cavity - shadow is covering the oral cavity covering the lesion.": "Shadow Covering oral Cavity",
-        "A retractor (e.g., ice-cream stick, fingers, or mirror) is obstructing the view of the lesion in the oral cavity.": "Retractor Covering the lesion A",
-        "Debris or saliva is present in the oral cavity, making it difficult to identify the lesion.": "Lots of Debris/Saliva",
-        "Other reasons that result in poor image quality": "Others"
+        "Image is blurry, lesions are hard to see.": "Blur",
+        "Oral cavity or lesion is out of focus.": "Out of focus",
+        "Image is cropped too tightly, oral cavity unclear.": "Overcropped",
+        " Too much face visible; oral cavity not well shown.": "Undercropped",
+        "Image taken from a wrong angle.": "Improper Angle",
+        "Lesion is hidden due to poor retraction.": "Oral Cavity not retracted well",
+        "Shadow obscures the lesion or oral cavity.": "Shadow Covering oral Cavity",
+        "Retractor blocks view of the lesion.": "Retractor Covering the lesion A",
+        "Debris or saliva obscures the lesion.": "Lots of Debris/Saliva",
+        "Other factors degrade image quality.": "Others"
     }
     
     # Prepare the data row
