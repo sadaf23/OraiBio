@@ -392,6 +392,9 @@ def initialize_session_state():
         st.session_state.total_batches = 1
     if 'current_batch' not in st.session_state:
         st.session_state.current_batch = 1
+    if 'loaded_existing_csv' not in st.session_state:
+        st.session_state.loaded_existing_csv = False
+
 
 def render_quality_checkboxes(current_file, current_assessment):
     """Render quality issues as checkboxes with improved styling"""
@@ -637,6 +640,13 @@ def main():
                         st.session_state.total_batches = 1
                         st.session_state.current_folder_id = folder_id
                         
+                        # Load existing CSV data if not already loaded
+                        if not st.session_state.loaded_existing_csv:
+                            existing_csv_data = get_existing_csv_data(service, folder_id)
+                            if existing_csv_data:
+                                st.session_state.csv_data = existing_csv_data
+                            st.session_state.loaded_existing_csv = True
+                        
                         # Fetch first batch
                         image_files, next_page_token = fetch_images_from_drive(
                             service, 
@@ -649,7 +659,6 @@ def main():
                             st.session_state.current_image_index = 0
                             st.session_state.current_image = None
                             st.session_state.image_assessments = {}
-                            st.session_state.csv_data = []
                             st.session_state.next_page_token = next_page_token
                             
                             # Update total batches estimate if there are more
