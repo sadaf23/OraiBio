@@ -274,8 +274,8 @@ def download_image(service, file_info):
 def upload_csv_to_drive(service, folder_id, csv_data):
     """Upload or update CSV file in Google Drive folder with improved error handling"""
     try:
-        if not csv_data:
-            st.warning("No CSV data to upload")
+        if not csv_data or not isinstance(csv_data, list):
+            st.warning("No valid CSV data to upload")
             return False
         
         # Define the CSV headers in the correct order
@@ -293,8 +293,11 @@ def upload_csv_to_drive(service, folder_id, csv_data):
         # Write headers
         csv_writer.writeheader()
         
-        # Write data rows
+        # Write data rows - ensure each row is a dictionary
         for row_data in csv_data:
+            if not isinstance(row_data, dict):
+                st.warning(f"Skipping invalid row data: {row_data}")
+                continue
             csv_writer.writerow(row_data)
         
         csv_content = csv_buffer.getvalue()
@@ -427,7 +430,7 @@ def render_quality_checkboxes(current_file, current_assessment):
     return selected_issues
 
 def update_csv_assessment(file_info, status, quality_issues):
-    """Update CSV data with assessment"""
+    """Update CSV data with assessment - returns properly formatted dictionary"""
     # Map quality issues to column names
     issue_columns = {
         "Image is blurry, lesions are hard to see.": "Blur",
@@ -442,15 +445,22 @@ def update_csv_assessment(file_info, status, quality_issues):
         "Other factors degrade image quality.": "Others"
     }
     
-    # Prepare the data row
+    # Prepare the data row with all required columns
     row = {
         'filename': file_info['name'],
-        'accept': 'Yes' if status == 'Accepted' else 'No'
+        'accept': 'Yes' if status == 'Accepted' else 'No',
+        'Blur': 'No',
+        'Out of focus': 'No',
+        'Overcropped': 'No',
+        'Undercropped': 'No',
+        'Improper Angle': 'No',
+        'Oral Cavity not retracted well': 'No',
+        'Shadow Covering oral Cavity': 'No',
+        'Retractor Covering the lesion A': 'No',
+        'Lots of Debris/Saliva': 'No',
+        'Others': 'No',
+        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
-    
-    # Initialize all quality issue columns to 'No'
-    for col in issue_columns.values():
-        row[col] = 'No'
     
     # Mark 'Yes' for any quality issues if rejected
     if status == 'Rejected':
@@ -458,20 +468,19 @@ def update_csv_assessment(file_info, status, quality_issues):
             if issue in issue_columns:
                 row[issue_columns[issue]] = 'Yes'
     
-    # Add timestamp
-    row['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
     return row
 
 def process_assessment(service, file_info, status, quality_issues):
     """Process assessment and handle CSV operations with better error handling"""
     try:
-        # Update CSV data
+        # Update CSV data - get properly formatted dictionary
         csv_row = update_csv_assessment(file_info, status, quality_issues)
         
-        # Add to session state CSV data
-        if 'csv_data' not in st.session_state:
+        # Ensure we're working with a list of dictionaries
+        if not isinstance(st.session_state.csv_data, list):
             st.session_state.csv_data = []
+        
+        # Add to session state CSV data
         st.session_state.csv_data.append(csv_row)
         
         # Try to upload CSV to Google Drive
@@ -481,7 +490,7 @@ def process_assessment(service, file_info, status, quality_issues):
                 upload_success = upload_csv_to_drive(
                     service, 
                     st.session_state.current_folder_id, 
-                    st.session_state.csv_data
+                    st.session_state.csv_data  # This should be a list of dicts
                 )
                 
                 if not upload_success:
@@ -490,7 +499,7 @@ def process_assessment(service, file_info, status, quality_issues):
                     upload_success = upload_csv_to_drive(
                         service, 
                         st.session_state.current_folder_id, 
-                        [csv_row]  # Just the new row
+                        [csv_row]  # Single row as a list with one dict
                     )
                 
                 if upload_success:
@@ -499,7 +508,7 @@ def process_assessment(service, file_info, status, quality_issues):
                     st.warning(f"Image {status.lower()} but CSV upload failed. Data saved locally.")
                     # Save to local file as backup
                     try:
-                        with open('local_backup.csv', 'a') as f:
+                        with open('local_backup.csv', 'a', newline='') as f:
                             writer = csv.DictWriter(f, fieldnames=csv_row.keys())
                             if f.tell() == 0:  # Write header if file is empty
                                 writer.writeheader()
