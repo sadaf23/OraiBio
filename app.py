@@ -168,7 +168,7 @@ def extract_folder_id(url):
     return None
 
 def get_existing_csv_data(service, folder_id):
-    """Get existing CSV data from Google Drive folder"""
+    """Get existing CSV data from Google Drive folder and return as list of dicts"""
     try:
         # Search for existing CSV file in the folder
         query = f"'{folder_id}' in parents and name='{CSV_FILENAME}' and trashed=false"
@@ -187,8 +187,9 @@ def get_existing_csv_data(service, folder_id):
                 _, done = downloader.next_chunk()
             
             fh.seek(0)
+            # Read CSV into list of dictionaries
             df = pd.read_csv(fh)
-            return df['filename'].tolist() if 'filename' in df.columns else []
+            return df.to_dict('records')
         
         return []
     except Exception as e:
@@ -395,8 +396,8 @@ def initialize_session_state():
         st.session_state.total_batches = 1
     if 'current_batch' not in st.session_state:
         st.session_state.current_batch = 1
-    if 'loaded_existing_csv' not in st.session_state:
-        st.session_state.loaded_existing_csv = False
+    if 'loaded_existing_data' not in st.session_state:
+        st.session_state.loaded_existing_data = False
 
 
 def render_quality_checkboxes(current_file, current_assessment):
@@ -650,11 +651,46 @@ def main():
                         st.session_state.current_folder_id = folder_id
                         
                         # Load existing CSV data if not already loaded
-                        if not st.session_state.loaded_existing_csv:
-                            existing_csv_data = get_existing_csv_data(service, folder_id)
-                            if existing_csv_data:
-                                st.session_state.csv_data = existing_csv_data
-                            st.session_state.loaded_existing_csv = True
+                        if not st.session_state.loaded_existing_data:
+                            existing_data = get_existing_csv_data(service, folder_id)
+                            if existing_data:
+                                st.session_state.csv_data = existing_data
+                                # Populate image_assessments from existing data
+                                for row in existing_data:
+                                    filename = row['filename']
+                                    status = 'Accepted' if row['accept'] == 'Yes' else 'Rejected'
+                                    quality_issues = []
+                                    # Map quality issues back from columns
+                                    issue_mapping = {
+                                        'Blur': "Image is blurry, lesions are hard to see.",
+                                        'Out of focus': "Oral cavity or lesion is out of focus.",
+                                        'Overcropped': "Image is cropped too tightly, oral cavity unclear.",
+                                        'Undercropped': " Too much face visible; oral cavity not well shown.",
+                                        'Improper Angle': "Image taken from a wrong angle.",
+                                        'Oral Cavity not retracted well': "Lesion is hidden due to poor retraction.",
+                                        'Shadow Covering oral Cavity': "Shadow obscures the lesion or oral cavity.",
+                                        'Retractor Covering the lesion A': "Retractor blocks view of the lesion.",
+                                        'Lots of Debris/Saliva': "Debris or saliva obscures the lesion.",
+                                        'Others': "Other factors degrade image quality."
+                                    }
+                                    for col, issue in issue_mapping.items():
+                                        if row.get(col) == 'Yes':
+                                            quality_issues.append(issue)
+                                    
+                                    # Find the file ID for this filename
+                                    file_id = None
+                                    for file_info in st.session_state.image_files:
+                                        if file_info['name'] == filename:
+                                            file_id = file_info['id']
+                                            break
+                                    
+                                    if file_id:
+                                        st.session_state.image_assessments[file_id] = {
+                                            'status': status,
+                                            'quality_issues': quality_issues,
+                                            'timestamp': row.get('timestamp', '')
+                                        }
+                            st.session_state.loaded_existing_data = True
                         
                         # Fetch first batch
                         image_files, next_page_token = fetch_images_from_drive(
@@ -667,7 +703,6 @@ def main():
                             st.session_state.image_files = image_files
                             st.session_state.current_image_index = 0
                             st.session_state.current_image = None
-                            st.session_state.image_assessments = {}
                             st.session_state.next_page_token = next_page_token
                             
                             # Update total batches estimate if there are more
@@ -677,7 +712,6 @@ def main():
                             st.rerun()
                         else:
                             st.warning("No unassessed images found in this folder")
-    
     # Display image navigation and assessment
     if st.session_state.image_files:
         st.markdown("---")
