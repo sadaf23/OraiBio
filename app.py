@@ -168,7 +168,7 @@ def extract_folder_id(url):
     return None
 
 def get_existing_csv_data(service, folder_id):
-    """Get existing CSV data from Google Drive folder and return as list of dicts"""
+    """Get existing CSV data from Google Drive folder"""
     try:
         # Search for existing CSV file in the folder
         query = f"'{folder_id}' in parents and name='{CSV_FILENAME}' and trashed=false"
@@ -187,9 +187,8 @@ def get_existing_csv_data(service, folder_id):
                 _, done = downloader.next_chunk()
             
             fh.seek(0)
-            # Read CSV into list of dictionaries
             df = pd.read_csv(fh)
-            return df.to_dict('records')
+            return df['filename'].tolist() if 'filename' in df.columns else []
         
         return []
     except Exception as e:
@@ -272,65 +271,65 @@ def download_image(service, file_info):
         st.error(f"Couldn't download {file_info['name']}: {str(e)}")
         return None
 
-def upload_csv_to_drive(service, folder_id, csv_data):
-    """Upload or update CSV file in Google Drive folder with improved error handling"""
+def upload_csv_to_drive(service, folder_id, new_csv_data):
+    """Upload or update CSV file in Google Drive folder by appending new data"""
     try:
-        if not csv_data or not isinstance(csv_data, list):
-            st.warning("No valid CSV data to upload")
+        if not new_csv_data:
+            st.warning("No CSV data to upload")
             return False
-        
-        # Define the CSV headers in the correct order
+
+        # Define headers
         headers = [
             'filename', 'accept', 'Blur', 'Out of focus', 'Overcropped', 
             'Undercropped', 'Improper Angle', 'Oral Cavity not retracted well',
             'Shadow Covering oral Cavity', 'Retractor Covering the lesion A',
             'Lots of Debris/Saliva', 'Others', 'timestamp'
         ]
-        
-        # Convert data to CSV format
-        csv_buffer = io.StringIO()
-        csv_writer = csv.DictWriter(csv_buffer, fieldnames=headers)
-        
-        # Write headers
-        csv_writer.writeheader()
-        
-        # Write data rows - ensure each row is a dictionary
-        for row_data in csv_data:
-            if not isinstance(row_data, dict):
-                st.warning(f"Skipping invalid row data: {row_data}")
-                continue
-            csv_writer.writerow(row_data)
-        
-        csv_content = csv_buffer.getvalue()
-        
-        if len(csv_content) == 0:
-            st.error("CSV content is empty!")
-            return False
-        
-        # Check if CSV already exists
+
+        # ---- 1. Read existing CSV if it exists ----
+        existing_rows = []
         query = f"'{folder_id}' in parents and name='{CSV_FILENAME}' and trashed=false"
         results = service.files().list(q=query, fields="files(id, name)").execute()
         files = results.get('files', [])
-        
-        # Reset buffer position before reading
+
+        if files:
+            file_id = files[0]['id']
+            request = service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            fh.seek(0)
+            try:
+                df_existing = pd.read_csv(fh)
+                existing_rows = df_existing.to_dict(orient="records")
+            except Exception as e:
+                st.warning(f"Could not parse existing CSV, starting fresh: {e}")
+
+        # ---- 2. Merge old + new (avoid duplicates) ----
+        all_rows = existing_rows + new_csv_data
+
+        # Drop duplicates by filename+timestamp (keep latest)
+        df_all = pd.DataFrame(all_rows)
+        df_all.drop_duplicates(subset=['filename'], keep='last', inplace=True)
+
+        # ---- 3. Write final CSV back to Drive ----
+        csv_buffer = io.StringIO()
+        df_all.to_csv(csv_buffer, index=False, columns=headers)
         csv_buffer.seek(0)
+
         csv_bytes = io.BytesIO(csv_buffer.getvalue().encode('utf-8'))
         media = MediaIoBaseUpload(csv_bytes, mimetype='text/csv', resumable=True)
-        
+
         if files:
             # Update existing file
-            file_id = files[0]['id']
-            try:
-                updated_file = service.files().update(
-                    fileId=file_id,
-                    media_body=media,
-                    fields='id,name'
-                ).execute()
-                st.success(f"CSV file updated successfully: {updated_file.get('name')}")
-                return True
-            except Exception as update_error:
-                st.error(f"Failed to update CSV file: {str(update_error)}")
-                return False
+            service.files().update(
+                fileId=file_id,
+                media_body=media,
+                fields='id,name'
+            ).execute()
+            st.success(f"CSV file updated successfully: {CSV_FILENAME}")
         else:
             # Create new file
             file_metadata = {
@@ -338,18 +337,15 @@ def upload_csv_to_drive(service, folder_id, csv_data):
                 'parents': [folder_id],
                 'mimeType': 'text/csv'
             }
-            try:
-                created_file = service.files().create(
-                    body=file_metadata,
-                    media_body=media,
-                    fields='id,name,parents'
-                ).execute()
-                st.success(f"CSV file created successfully: {created_file.get('name')}")
-                return True
-            except Exception as create_error:
-                st.error(f"Failed to create CSV file: {str(create_error)}")
-                return False
-        
+            service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id,name,parents'
+            ).execute()
+            st.success(f"CSV file created successfully: {CSV_FILENAME}")
+
+        return True
+
     except Exception as e:
         st.error(f"Failed to upload CSV to Google Drive: {str(e)}")
         return False
@@ -396,8 +392,8 @@ def initialize_session_state():
         st.session_state.total_batches = 1
     if 'current_batch' not in st.session_state:
         st.session_state.current_batch = 1
-    if 'loaded_existing_data' not in st.session_state:
-        st.session_state.loaded_existing_data = False
+    if 'loaded_existing_csv' not in st.session_state:
+        st.session_state.loaded_existing_csv = False
 
 
 def render_quality_checkboxes(current_file, current_assessment):
@@ -431,7 +427,7 @@ def render_quality_checkboxes(current_file, current_assessment):
     return selected_issues
 
 def update_csv_assessment(file_info, status, quality_issues):
-    """Update CSV data with assessment - returns properly formatted dictionary"""
+    """Update CSV data with assessment"""
     # Map quality issues to column names
     issue_columns = {
         "Image is blurry, lesions are hard to see.": "Blur",
@@ -446,22 +442,15 @@ def update_csv_assessment(file_info, status, quality_issues):
         "Other factors degrade image quality.": "Others"
     }
     
-    # Prepare the data row with all required columns
+    # Prepare the data row
     row = {
         'filename': file_info['name'],
-        'accept': 'Yes' if status == 'Accepted' else 'No',
-        'Blur': 'No',
-        'Out of focus': 'No',
-        'Overcropped': 'No',
-        'Undercropped': 'No',
-        'Improper Angle': 'No',
-        'Oral Cavity not retracted well': 'No',
-        'Shadow Covering oral Cavity': 'No',
-        'Retractor Covering the lesion A': 'No',
-        'Lots of Debris/Saliva': 'No',
-        'Others': 'No',
-        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        'accept': 'Yes' if status == 'Accepted' else 'No'
     }
+    
+    # Initialize all quality issue columns to 'No'
+    for col in issue_columns.values():
+        row[col] = 'No'
     
     # Mark 'Yes' for any quality issues if rejected
     if status == 'Rejected':
@@ -469,19 +458,20 @@ def update_csv_assessment(file_info, status, quality_issues):
             if issue in issue_columns:
                 row[issue_columns[issue]] = 'Yes'
     
+    # Add timestamp
+    row['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
     return row
 
 def process_assessment(service, file_info, status, quality_issues):
     """Process assessment and handle CSV operations with better error handling"""
     try:
-        # Update CSV data - get properly formatted dictionary
+        # Update CSV data
         csv_row = update_csv_assessment(file_info, status, quality_issues)
         
-        # Ensure we're working with a list of dictionaries
-        if not isinstance(st.session_state.csv_data, list):
-            st.session_state.csv_data = []
-        
         # Add to session state CSV data
+        if 'csv_data' not in st.session_state:
+            st.session_state.csv_data = []
         st.session_state.csv_data.append(csv_row)
         
         # Try to upload CSV to Google Drive
@@ -491,7 +481,7 @@ def process_assessment(service, file_info, status, quality_issues):
                 upload_success = upload_csv_to_drive(
                     service, 
                     st.session_state.current_folder_id, 
-                    st.session_state.csv_data  # This should be a list of dicts
+                    st.session_state.csv_data
                 )
                 
                 if not upload_success:
@@ -500,8 +490,8 @@ def process_assessment(service, file_info, status, quality_issues):
                     upload_success = upload_csv_to_drive(
                         service, 
                         st.session_state.current_folder_id, 
-                        [csv_row]  # Single row as a list with one dict
-                    )
+                        [csv_row]  # append just the new row
+                        )
                 
                 if upload_success:
                     st.success(f"Image {status.lower()} and CSV updated successfully!")
@@ -509,7 +499,7 @@ def process_assessment(service, file_info, status, quality_issues):
                     st.warning(f"Image {status.lower()} but CSV upload failed. Data saved locally.")
                     # Save to local file as backup
                     try:
-                        with open('local_backup.csv', 'a', newline='') as f:
+                        with open('local_backup.csv', 'a') as f:
                             writer = csv.DictWriter(f, fieldnames=csv_row.keys())
                             if f.tell() == 0:  # Write header if file is empty
                                 writer.writeheader()
@@ -650,48 +640,6 @@ def main():
                         st.session_state.total_batches = 1
                         st.session_state.current_folder_id = folder_id
                         
-                        # Load existing CSV data if not already loaded
-                        if not st.session_state.loaded_existing_data:
-                            existing_data = get_existing_csv_data(service, folder_id)
-                            if existing_data:
-                                st.session_state.csv_data = existing_data
-                                # Populate image_assessments from existing data
-                                for row in existing_data:
-                                    filename = row['filename']
-                                    status = 'Accepted' if row['accept'] == 'Yes' else 'Rejected'
-                                    quality_issues = []
-                                    # Map quality issues back from columns
-                                    issue_mapping = {
-                                        'Blur': "Image is blurry, lesions are hard to see.",
-                                        'Out of focus': "Oral cavity or lesion is out of focus.",
-                                        'Overcropped': "Image is cropped too tightly, oral cavity unclear.",
-                                        'Undercropped': " Too much face visible; oral cavity not well shown.",
-                                        'Improper Angle': "Image taken from a wrong angle.",
-                                        'Oral Cavity not retracted well': "Lesion is hidden due to poor retraction.",
-                                        'Shadow Covering oral Cavity': "Shadow obscures the lesion or oral cavity.",
-                                        'Retractor Covering the lesion A': "Retractor blocks view of the lesion.",
-                                        'Lots of Debris/Saliva': "Debris or saliva obscures the lesion.",
-                                        'Others': "Other factors degrade image quality."
-                                    }
-                                    for col, issue in issue_mapping.items():
-                                        if row.get(col) == 'Yes':
-                                            quality_issues.append(issue)
-                                    
-                                    # Find the file ID for this filename
-                                    file_id = None
-                                    for file_info in st.session_state.image_files:
-                                        if file_info['name'] == filename:
-                                            file_id = file_info['id']
-                                            break
-                                    
-                                    if file_id:
-                                        st.session_state.image_assessments[file_id] = {
-                                            'status': status,
-                                            'quality_issues': quality_issues,
-                                            'timestamp': row.get('timestamp', '')
-                                        }
-                            st.session_state.loaded_existing_data = True
-                        
                         # Fetch first batch
                         image_files, next_page_token = fetch_images_from_drive(
                             service, 
@@ -703,6 +651,8 @@ def main():
                             st.session_state.image_files = image_files
                             st.session_state.current_image_index = 0
                             st.session_state.current_image = None
+                            st.session_state.image_assessments = {}
+                            st.session_state.csv_data = []
                             st.session_state.next_page_token = next_page_token
                             
                             # Update total batches estimate if there are more
@@ -712,6 +662,7 @@ def main():
                             st.rerun()
                         else:
                             st.warning("No unassessed images found in this folder")
+    
     # Display image navigation and assessment
     if st.session_state.image_files:
         st.markdown("---")
